@@ -1,0 +1,186 @@
+#!/bin/bash
+# notify-sshd v0.1.3 last mod 2011/12/07
+# Latest version at <http://github.com/ryran/b19scripts>
+# Copyright 2011 Ryan Sawhill <ryan@b19.org>
+#
+#    This program is free software: you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation, either version 3 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+#    General Public License <gnu.org/licenses/gpl.html> for more details.
+#-------------------------------------------------------------------------------
+# Run this as whatever user is logged in to your desktop environment. Run it via
+# a shortcut or your file manager or in a terminal. It needs to read the logfile
+# /var/log/secure (or /var/log/auth.log, etc) in order to display notifications
+# when people log in (or try to log in). To accomplish this it will check for
+# sudo rights if you're in a terminal; otherwise it will try to use a gui sudo
+# app (like beesu) for auth. If that doesn't work, it prints a message telling
+# you some different routes you could go to accomplish this. My favorite way:
+#     setfacl -m u:$USER:r $logfile
+# That way you don't have to configure sudo or type a password each time.
+#
+# Note: I kept things extremely modular -- it would be pretty simple to tweak
+# this for watching a different log file (or potentially multiple files).
+# This was a learning project, so I also spent tons of energy working on error
+# conditions. It's pretty damn bullet-proof. Not that it needed to be... :)
+# Feedback very much appreciated! Contact info above.
+#-------------------------------------------------------------------------------
+
+# All errors to dev/null
+exec 2>/dev/null
+
+# A convenience/customization variable
+zero=${0##*/}
+
+# Error codes
+e_MISSING_notify_send=113
+e_NO_DISPLAY=106
+e_LOCKING_RACE_CONDITION=85
+e_AUTH_FAILED=101
+e_FAILED_TO_START_TAIL=99
+e_SUICIDE=79
+
+#===============================================================================
+#------------------------------------------- CHECK PRE-REQS, CONFIGURE ENV ---->
+
+# Bail if no notify_send or no $DISPLAY
+if ! command -v notify-send >/dev/null; then
+  echo -e "ERROR\nThe purpose of this script is to use the 'notify-send' utility to display gui\nnotifications for sshd activity.\nnotify-send does not appear to be installed on your system."
+  exit $e_MISSING_notify_send
+
+elif [[ -z $DISPLAY ]]; then
+  echo -e "ERROR\n\$DISPLAY not set. Simply put, you must run this from a terminal or shortcut in\nyour desktop environment."
+  exit $e_NO_DISPLAY
+fi
+
+# Yes, I know file locking traditionally is simple, with a script exiting early if it finds a lockfile, but I wanted instead to implement it so that our script would be guaranteed to gracefully replace any other copies of itself that are running (I daresay I accomplished that)
+lock=$HOME/.$zero.lock
+set -o noclobber
+if ! echo $$ >$lock; then
+  kill -0 $(<$lock) && kill $(<$lock) || rm $lock
+  sleep 1
+  echo $$ >$lock || exit $e_LOCKING_RACE_CONDITION
+fi
+trap "rm $lock" EXIT
+set +o noclobber
+  
+# Variables -- don't actually need to unset most of them, but it's a good habit
+unset logfile pwdreq tail_log Gsudo tstamp ip prev_ip msg prev_msg i success
+
+# File to watch (different on different distros -- contact me to add more plz!)
+for logfile in /var/log/secure /var/log/auth.log; do
+  [[ -f $logfile ]] && break
+done
+
+# OR to keep it simple, you can just uncomment the next line and choose a logfile
+#logfile=/var/log/XXXXX
+
+# We're about to figure out our tail command, but let's break it down first:
+# [ tail -Fn0 --pid=$$ $logfile ]
+# -F == (--folow=name --retry) means we follow the file NAME (i.e., if $logfile is rotated, we'll be following the new copy, not the one that was rotated out
+# --pid=$$ is important: It ensures that the tail and the rest of its chain stop if our script exits
+# SO, if we can read our logfile, then our tail command is simple
+if [[ -r $logfile ]]; then
+  tail_log="tail -Fn0 --pid=$$ $logfile"
+  
+else # Otherwise, we need to figure out how we're going to get privileges
+  # If we're on a tty and sudo tail can be run with those opts, use that
+  if sudo -l tail -Fn0 --pid=$$ $logfile >/dev/null; then
+    tail_log="sudo tail -Fn0 --pid=$$ $logfile"
+    # If we have to run sudo tail with a password, set a variable for later
+    sudo -l | grep -q '(root) NOPASSWD: .*tail\|(root) NOPASSWD: ALL' || pwdreq=yes
+
+  else # Else, try to use a gui sudo program
+    for Gsudo in beesu kdesu gksu ktsuss NO_Gsudo; do command -v $Gsudo >/dev/null && break ; done
+    [[ $Gsudo != NO_Gsudo ]] && tail_log="$Gsudo tail -Fn0 --pid=$$ $logfile"
+    pwdreq=yes
+  fi
+fi
+
+# If the gui sudo thing didn't pan out, time to throw an error
+[[ -z $tail_log ]] && {
+  notify-send -u critical "$zero: Error - Couldn't open $logfile" "OPTIONS:\n(1) Run 'setfacl -m u:$USER:r $logfile' as root, giving $USER the permanent ability to read it\n(2) Configure sudo so $USER can run, at the least, '/usr/bin/tail -Fn0 *', preferably with NOPASSWD\n(3) Install beesu, kdesu, or gksu so $zero can authenticate you as root from a desktop session"
+  exit $e_AUTH_FAILED ;}
+
+
+#===============================================================================
+#------------------------------------------------------- KICK OFF THE TAIL ---->
+# If you strip out the comments, it's really quite simple :)
+
+# Run our tail command, piped to...
+$tail_log |
+
+  # grep -- for sshd lines that say Accepted or Failed, then pipe to...
+  grep --line-buffered 'sshd.*Accepted\|sshd.*Failed' |
+
+    # while/read -- to loop & get data one line at a time
+    while read line; do
+
+      # Now we use bash variable substring magic to pull out pieces of the line
+      # First, the timestamp: simply delete " HOSTNAME" and everything after it
+      tstamp=${line/ $(hostname)*/}
+
+      # The ipaddr is a little more annoying & less rock-solid, but that's fine with me
+      # First we delete everything on the left of the ipaddr (up to and including the "from ") and then from the right to left (up to and including " port")
+      prev_ip=$ip; ip=${line#*from }; ip=${ip% port*}
+
+      # The message is everything after the first occurence of "]: "
+      prev_msg=$msg; msg=${line#*]: }
+
+      # Now we've got our variables, so...
+      # First we test to see if we're dealing with a recurring failed login attempt message from the same ipaddr
+      # If the first word of our message is Failed &&
+      # the previous & current message are the same (minus ports) &&
+      # the ipaddrs are the same && our counter hasn't reached 3...
+      if [[ ${msg%% *} = Failed && ${prev_msg% port*} = ${msg% port*} && $prev_ip = $ip && $i -ne 3 ]]; then
+        i=$(($i+1)) # Increment our identical_failure_message counter by 1
+        # Basically, this all boils down to:
+        # We ignore every 3 identical failed login attempts on the same user [from the same ip address]
+        [[ $i -eq 3 ]] && {
+          i=0 ; notify-send -u critical "sshd: 3 more failed login attempts by $ip" "Data for latest occurence:\n[$tstamp] $msg" ;}
+
+      # If we're not dealing with repeating failed login attempts...
+      else
+        i=0 # Set our counter to 0
+        # Run different commands based on the first word of our message:
+        case ${msg%% *} in
+          # Note: I used "-u critical" because notifications disappear to quickly on my Fedora desktop otherwise. TODO: Get less disturbing icon for the accepted message
+          Accepted) notify-send -u critical "sshd: New session initiated by $ip" "[$tstamp] $msg" ;;
+          Failed)   notify-send -u critical "sshd: Failed login attempt by $ip" "[$tstamp] $msg" ;;
+        esac
+      fi
+    done &
+    # Send that whole chain of commands into the background so we can continue
+
+
+#===============================================================================
+#---------------------------------------------------------------- REACTING ---->
+# This section checks to make sure we successfully started a tail on $logfile
+# It also ensures we shut down if our lock disappears or gets co-opted
+
+# (DEBUG) #ps -C tail --ppid $$ -o pid,args # Show all tails + all children
+
+# If we're using sudo w/a password, or using one of the gui sudo apps, we need to give the user some time before we check up on tail
+[[ $pwdreq = yes ]] && sleep 10
+
+# Confirm that a tail has been started, print success or fail notification
+if ps --no-header -o args -C tail | grep -q -- "^tail -Fn0 --pid=$$"; then :
+  notify-send "$zero: $logfile" "Successfully initialized monitoring & notification process. If you didn't start $zero from a terminal and you find you want to shut it down at some point, deleting $lock will cause it to quit cleanly [within 2min]."
+else
+  notify-send -u critical "$zero ERROR" "There was an error initializing $logfile monitoring process and $zero shut down. You can try running $0 from a terminal after commenting out the first non-comment line ('exec 2>/dev/null') to see if there are any instructive errors."
+  exit $e_FAILED_TO_START_TAIL
+fi
+
+# Insurance against a runaway process; as long as the lock describes us, stay alive
+while [[ $$ = $(<$lock) ]]; do
+  sleep 2m
+done
+
+# Once the lock no longer describes us, remove our exit trap and quit
+trap EXIT
+exit $e_SUICIDE
+
