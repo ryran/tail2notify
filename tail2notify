@@ -1,5 +1,5 @@
 #!/bin/bash
-# tail2notify v0.3.1 last mod 2011/12/19
+# tail2notify v0.3.3 last mod 2011/12/20
 # Latest version at <http://github.com/ryran/tail2notify>
 # Copyright 2011 Ryan Sawhill <ryan@b19.org>
 #
@@ -13,7 +13,7 @@
 #    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
 #    General Public License <gnu.org/licenses/gpl.html> for more details.
 #------------------------------------------------------------------------------
-# The simple purpose here is to pipe tail -f to notify-send in order to get
+# The simple purpose here is to pipe tail -F to notify-send in order to get
 # desktop notifications when certain things happen in a designated log file.
 # Both the log file and search string are configurable from the command-line.
 #
@@ -40,38 +40,44 @@ zero=${0##*/}
 # ERROR CODES
 e_MISSING_notify_send=113
 e_NO_DISPLAY=106
+e_BAD_LOGNAME=79
+e_BAD_ARGV=80
 e_AUTH_FAILED=101
 e_FAILED_TO_START_TAIL=99
-e_BAD_ARGV=79
 
 
 #==============================================================================
 #------------------------------------------ CHECK PRE-REQS, CONFIGURE ENV ---->
 
-# BAIL IF DON'T HAVE notify_send OR IF $DISPLAY NOT SET
+# BAIL IF DON'T HAVE notify_send OR IF $DISPLAY NOT SET OR IF RUNNING w/ SU
 if ! command -v notify-send >/dev/null; then
-  echo -e "ERROR\nThe purpose of this script is to use the 'notify-send' utility to display gui\nnotifications for log-file activity.\nnotify-send does not appear to be installed on your system." >&2
+  printf "ERROR\nnotify-send does not appear to be installed on your system.\nThe purpose of this script is to use the 'notify-send' utility to display\ndesktop notifications for log-file activity.\n" >&2
   exit $e_MISSING_notify_send
 
 elif [[ -z $DISPLAY ]]; then
-  echo -e "ERROR\n\$DISPLAY not set. Simply put, you must run this from a terminal or shortcut in\nyour desktop environment." >&2
+  printf "ERROR\n\$DISPLAY not set. Simply put, you must run this from a terminal or shortcut in\nyour desktop environment.\n" >&2
   exit $e_NO_DISPLAY
+  
+elif [[ $(logname) != $USER ]]; then
+  printf "ERROR\nYou must run this script as the user logged in to your desktop. You can't run\nit as root unless root is logged into the desktop environment.\n" >&2
+  exit $e_BAD_LOGNAME
 fi
 
 
 # PID FILE FOR ALL tail2notify INSTANCES
 # Here we create and manage a file containing PIDs of all our running instances
 # of the tail2notify script
-global_tail2notify_pidlist_file=$HOME/.$zero.pids
+global_pidlist_file=$HOME/.$zero.pids
 
 # Garbage collection
-for pid in $(<$global_tail2notify_pidlist_file); do
+[[ -f $global_pidlist_file ]] &&
+for pid in $(<$global_pidlist_file); do
   [[ -e /proc/$pid ]] && break
-  sed -i /$pid/d $global_tail2notify_pidlist_file
+  sed -i /$pid/d $global_pidlist_file
 done
 
-echo $$ >>$global_tail2notify_pidlist_file
-trap "sed -i /$$/d $global_tail2notify_pidlist_file" EXIT
+printf "$$\n" >>$global_pidlist_file
+trap "sed -i /$$/d $global_pidlist_file" EXIT
 
   
 # VARIABLES -- don't actually need to unset most of them, but it's a good habit
@@ -82,25 +88,25 @@ unset version simple mode search_str logfile pwdreq tail_log Gsudo tstamp prev_t
 # CHECK FOR HELP QUERY
 usage="Usage: $zero [--ssh|--vpn]\n   or: $zero [--simple|--simplest] 'GREP_SEARCHSTRING' [LOGFILE]\n"
 case ${1##*-} in
-  \?) echo -en "$usage"; exit
+  \?) printf "$usage"; exit
 ;;
   help|h)
-echo -e "$usage\nUse tail -f and grep to watch for logfile events and send notifications to the
+printf "$usage\nUse tail -F and grep to watch for logfile events and send notifications to the
 desktop via the notify-send utility. With no arguments, $zero defaults to
 watching for sshd activity. If using a custom search string and no logfile is
 specified, LOGFILE defaults to /var/log/messages. If you have already tried
 running $zero on some file and the output is not what you expect, you can use
 '--simple', which will prevent any special formatting of messages but will stack
 repeat messages together. Or you can try '--simplest' which sends every single
-new line from 'tail -f' straight to notify-send. Warning: both of these options,
+new line from 'tail -F' straight to notify-send. Warning: both of these options,
 the SEARCHSTRING, and the LOGFILE will only be detected if they are in the
 order the usage summary above shows them in. 
 
-Presets:"
-echo "
+Presets:\n"
+printf "
  ssh@watches /var/log/secure or /var/log/auth.log for ssh login attemps
  vpn@watches /var/log/messages for a crumbling openvpn connection" | column -s@ -t
-echo "
+printf "
 If you don't run with one of the above preset options, you must specify a
 search string and a log file to watch. These must be only one shell word, i.e.,
 you should use quotes to protect the search string from your shell. The search
@@ -122,7 +128,7 @@ $(grep '^e_.*=' $0 | sed 's/^/  /')
 
 Version info: $(head -n2 $0 | grep -o 'tail2notify v.*')
 Report bugs or suggestions to <ryan@b19.org>
-Or see <github.com/ryran/tail2notify> for bug tracker & latest version"
+Or see <github.com/ryran/tail2notify> for bug tracker & latest version\n"
 exit
 ;;
 esac
@@ -133,7 +139,7 @@ if [[ $1 == --simple || $1 == --simplest ]]; then
   simple=${1##--}
   shift
   [[ $# -eq 1 || $# -eq 2 ]] || {
-    echo -e "Error: need more arguments\n$usage\nRun with --help" >&2
+    printf "Error: need more arguments\n$usage\nRun with --help\n" >&2
     exit $e_BAD_ARGV; }
 fi
 
@@ -148,7 +154,7 @@ if [[ $# -eq 0 || $1 == --ssh ]]; then
     [[ -f $logfile ]] && break
   done
   mode=ssh
-  [[ $# > 1 ]] && echo "Extra argument(s) ignored" >&2
+  [[ $# > 1 ]] && printf "Extra argument(s) ignored\n" >&2
 
 # If first argument is --vpn, set our mode, searchstr, & logfile accordingly
 elif [[ $1 == --vpn ]]; then
@@ -156,7 +162,7 @@ elif [[ $1 == --vpn ]]; then
   search_str='openvpn.*ECONNREFUSED\|openvpn.*Inactivity.timeout\|openvpn.*HOST_NOT_FOUND'
   logfile=/var/log/messages
   mode=messages
-  [[ $# > 1 ]] && echo "Extra argument(s) ignored" >&2
+  [[ $# > 1 ]] && printf "Extra argument(s) ignored\n" >&2
 
 # Here you can easily customize the script yourself, adding a custom preset
 #elif [[ $1 == --YourCustomOptionHere ]]; then
@@ -166,7 +172,7 @@ elif [[ $1 == --vpn ]]; then
   #mode=messages
   #mode=simple
   #mode=simplest
-  #[ $# > 1 ]] && echo "Extra argument(s) ignored" >&2
+  #[ $# > 1 ]] && printf "Extra argument(s) ignored\n" >&2
 
 # If only 1 argument (and it wasn't one of the above), then assume it's a
 # search string and that user wants to follow /var/log/messages
@@ -182,12 +188,12 @@ elif [[ $# -eq 2 ]]; then
   search_str=$1
   logfile=$2
   [[ -f $logfile ]] || {
-    echo -e "Error: logfile '$2' does not exist\n$usage\nRun with --help" >&2
+    printf "Error: logfile '$2' does not exist\n$usage\nRun with --help\n" >&2
     exit $e_BAD_ARGV; }
   [[ -n $simple ]] && mode=$simple || mode=messages
   
 else
-  echo -e "Error: improper argument(s)\n$usage\nRun with --help" >&2
+  printf "Error: improper argument(s)\n$usage\nRun with --help\n" >&2
   exit $e_BAD_ARGV
 fi
 
@@ -394,11 +400,11 @@ ps -C tail --ppid $$ -o ppid,pid,args >&2 # Show all tails + all children
 
 # Confirm that a tail has been started, print success or fail notification
 if ps --no-header -o args -C tail | grep -q -- "^tail -Fn0 --pid=$$"; then
-  notify-send "$zero monitoring $logfile" "Successfully initialized monitoring process. If you didn't start $zero from a terminal and you want to shut it down at some point, a simple TERM signal will do the trick (e.g. 'pkill $zero' or 'killall $zero'). You can also peruse a list of $zero PIDs in $global_tail2notify_pidlist_file."
-  echo -e "\nBegan monitoring file '$logfile' for search string '$search_str' ..." >&2
+  notify-send "$zero monitoring $logfile" "Successfully initialized monitoring process. If you didn't start $zero from a terminal and you want to shut it down at some point, a simple TERM signal will do the trick (e.g. 'pkill $zero' or 'killall $zero'). You can also peruse a list of $zero PIDs in ~/${global_pidlist_file##*/}."
+  printf "\nBegan monitoring file '$logfile' for search string '$search_str' ...\n" >&2
 else
   notify-send -u critical "$zero ERROR" "There was an error initializing $logfile monitoring process and $zero shut down. If you haven't yet, try running $0 from a terminal to see if there are any instructive errors."
-  echo -e "\nError initializing monitoring of file '$logfile' for search string '$search_str'" >&2
+  printf "\nError initializing monitoring of file '$logfile' for search string '$search_str'\n" >&2
   exit $e_FAILED_TO_START_TAIL
 fi
 
