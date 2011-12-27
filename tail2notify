@@ -1,5 +1,5 @@
 #!/bin/bash
-# tail2notify v0.3.3 last mod 2011/12/20
+# tail2notify v0.3.4 last mod 2011/12/27
 # Latest version at <http://github.com/ryran/tail2notify>
 # Copyright 2011 Ryan Sawhill <ryan@b19.org>
 #
@@ -45,6 +45,9 @@ e_BAD_ARGV=80
 e_AUTH_FAILED=101
 e_FAILED_TO_START_TAIL=99
 
+# Note: I use urgency of critical because notifications disappear too quickly
+# on my Fedora desktop otherwise -- other choices are low & normal
+notifysend_urgency='critical'
 
 #==============================================================================
 #------------------------------------------ CHECK PRE-REQS, CONFIGURE ENV ---->
@@ -82,48 +85,45 @@ trap "sed -i /$$/d $global_pidlist_file" EXIT
   
 # VARIABLES -- don't actually need to unset most of them, but it's a good habit
 # to get into & it makes it easy for you see what variables we use
-unset version simple mode search_str logfile pwdreq tail_log Gsudo tstamp prev_tstamp ip prev_ip msg prev_msg i success title
+unset simple mode search_str logfile pwdreq tail_log Gsudo tstamp prev_tstamp ip prev_ip msg prev_msg i success title
 
 
 # CHECK FOR HELP QUERY
-usage="Usage: $zero [--ssh|--vpn]\n   or: $zero [--simple|--simplest] 'GREP_SEARCHSTRING' [LOGFILE]\n"
+usage="Usage: $zero [--ssh|--vpn]\n   or: $zero [--simple|--simplest] 'GREP_SEARCHSTRING' [LOGFILE]\n   or: $zero -a LOGFILE\n"
 case ${1##*-} in
   \?) printf "$usage"; exit
 ;;
   help|h)
-printf "$usage\nUse tail -F and grep to watch for logfile events and send notifications to the
+printf "$usage
+Use tail -F and grep to watch for logfile events and send notifications to the
 desktop via the notify-send utility. With no arguments, $zero defaults to
 watching for sshd activity. If using a custom search string and no logfile is
-specified, LOGFILE defaults to /var/log/messages. If you have already tried
-running $zero on some file and the output is not what you expect, you can use
-'--simple', which will prevent any special formatting of messages but will stack
-repeat messages together. Or you can try '--simplest' which sends every single
-new line from 'tail -F' straight to notify-send. Warning: both of these options,
-the SEARCHSTRING, and the LOGFILE will only be detected if they are in the
-order the usage summary above shows them in. 
+specified, LOGFILE defaults to /var/log/messages.
 
-Presets:\n"
+Options:\n"
 printf "
- ssh@watches /var/log/secure or /var/log/auth.log for ssh login attemps
- vpn@watches /var/log/messages for a crumbling openvpn connection" | column -s@ -t
+ --ssh@watches /var/log/secure or /var/log/auth.log for ssh login attemps
+ --vpn@watches /var/log/messages for a crumbling openvpn connection
+ --simple@prevents any attempt at specially formatting input
+ --simplest@like --simple, but also shows duplicate messages
+ -a@used alone, this option is an alias for --simplest '.*'" |
+  column -s@ -t
 printf "
-If you don't run with one of the above preset options, you must specify a
-search string and a log file to watch. These must be only one shell word, i.e.,
-you should use quotes to protect the search string from your shell. The search
-string is passed to grep, so regex is possible. As an EXAMPLE, you could try:
+If you don't use one of --ssh/--vpn/-a, you must specify a search string, which
+is passed to grep, so simple regex is possible. As an EXAMPLE, you could try:
 
   $zero 'parrot\|lumberjack'
 
 Then run 'logger dead parrot' or 'logger hes a lumberjack' to see it in action.
-Also, try the same thing with the --simple option to see the differences.
-An even simpler EXAMPLE would be to simply run $zero with no args and then ssh
-into localhost. Try screwing up your password as well.
+Next try the same with --simple and --simplest to see how that changes output.
 
-A last EXAMPLE which will generate a notification for every new line added:
+These next two EXAMPLES are identical (the -a option is an alias for
+'--simplest .*') and will generate notifications for every new line added:
 
   $zero --simplest '.*' FILE
+  $zero -a FILE
 
-Error code info:
+Error codes:
 $(grep '^e_.*=' $0 | sed 's/^/  /')
 
 Version info: $(head -n2 $0 | grep -o 'tail2notify v.*')
@@ -174,6 +174,15 @@ elif [[ $1 == --vpn ]]; then
   #mode=simplest
   #[ $# > 1 ]] && printf "Extra argument(s) ignored\n" >&2
 
+elif [[ $1 == -a ]]; then
+  search_str='.*'
+  logfile=$2
+  [[ -f $logfile ]] || {
+    printf "Error: logfile '$2' does not exist\n$usage\nRun with --help\n" >&2
+    exit $e_BAD_ARGV; }
+  mode=simplest
+  [[ $# > 2 ]] && printf "Extra argument(s) ignored\n" >&2
+    
 # If only 1 argument (and it wasn't one of the above), then assume it's a
 # search string and that user wants to follow /var/log/messages
 # Also, check to see if user asked for one of the simple modes
@@ -228,7 +237,7 @@ fi
 
 # If none of that worked, time to throw an error
 [[ -z $tail_log ]] && {
-  notify-send -u critical "$zero: Error - Couldn't open $logfile" "OPTIONS:\n(1) Run 'setfacl -m u:$USER:r $logfile' as root, giving $USER the permanent ability to read it\n(2) Configure sudo so $USER can run, at the least, '/usr/bin/tail -Fn0 *', preferably with NOPASSWD\n(3) Install beesu, kdesu, or gksu so $zero can authenticate you as root from a desktop session"
+  notify-send -u $notifysend_urgency "$zero: Error - Couldn't open $logfile" "OPTIONS:\n(1) Run 'setfacl -m u:$USER:r $logfile' as root, giving $USER the permanent ability to read it\n(2) Configure sudo so $USER can run, at the least, '/usr/bin/tail -Fn0 *', preferably with NOPASSWD\n(3) Install beesu, kdesu, or gksu so $zero can authenticate you as root from a desktop session"
   exit $e_AUTH_FAILED ;}
 
 
@@ -283,20 +292,15 @@ Watch_sshd(){
           #   * If there's a 5th time, it's as if we're starting over at step 1
           [[ $i -eq 3 ]] && {
             i=0
-            notify-send -u critical "sshd: 3 more failed login attempts by $ip" "Data for last occurence:\n[$tstamp] $msg" ;}
+            notify-send -u $notifysend_urgency "sshd: 3 more failed login attempts by $ip" "Data for last occurence:\n[$tstamp] $msg" ;}
 
         # If we're not dealing with repeating failed login attempts...
         else
           i=0 # Set counter to 0
           # Run different commands based on the first word of our message:
           case ${msg%% *} in
-            # Note: I used "-u critical" because notifications disappear too
-            # quickly on my Fedora desktop otherwise -- feel free to search &
-            # replace "-u critical " to get rid of that option if it doesn't
-            # work well on your system
-            # TODO: Get less disturbing icon for the accepted message
-            Accepted) notify-send -u critical "sshd: New session initiated by $ip" "[$tstamp] $msg" ;;
-            Failed)   notify-send -u critical "sshd: Failed login attempt by $ip" "[$tstamp] $msg" ;;
+            Accepted) notify-send -u $notifysend_urgency "sshd: New session initiated by $ip" "[$tstamp] $msg" ;;
+            Failed)   notify-send -u $notifysend_urgency "sshd: Failed login attempt by $ip" "[$tstamp] $msg" ;;
           esac
         fi
       done &
@@ -306,7 +310,7 @@ Watch_sshd(){
 
 # Here we have flexible watching function, which is tailored to take advantage
 # of the kind of lines you usually see in e.g. /var/log/messages
-# The functions that are different from above are commented
+# The parts that are different from above are commented
 
 Watch_messages(){
   $tail_log |
@@ -328,14 +332,14 @@ Watch_messages(){
         # we got our last duplicate (and obviously a new message)
         elif [[ $i > 0 ]]; then
           # Print repeated message
-          notify-send -u critical "$title repeated msg $i times" "Last occurence @ $prev_tstamp:\n$prev_msg"
+          notify-send -u $notifysend_urgency "$title repeated msg $i times" "Last occurence @ $prev_tstamp:\n$prev_msg"
           i=0
           # Print the most recent (non-repeated) message
-          notify-send -u critical "$title @ $tstamp" "$msg"
+          notify-send -u $notifysend_urgency "$title @ $tstamp" "$msg"
 
         # Else, we're not dealing with repeating messages at all
         else
-          notify-send -u critical "$title @ $tstamp" "$msg"
+          notify-send -u $notifysend_urgency "$title @ $tstamp" "$msg"
           i=0
         fi
       done &
@@ -354,11 +358,11 @@ Watch_simple(){
         if [[ $prev_msg == $msg ]]; then
           i=$(($i+1))
         elif [[ $i > 0 ]]; then
-          notify-send -u critical "$logfile repeated msg $i times" "$prev_msg"
+          notify-send -u $notifysend_urgency "$logfile repeated msg $i times" "$prev_msg"
           i=0
-          notify-send -u critical "$logfile" "$msg"
+          notify-send -u $notifysend_urgency "$logfile" "$msg"
         else
-          notify-send -u critical "$logfile" "$msg"
+          notify-send -u $notifysend_urgency "$logfile" "$msg"
           i=0
         fi
       done &
@@ -371,7 +375,7 @@ Watch_simplest(){
   $tail_log |
     grep --line-buffered "$search_str" |
       while read line; do
-        notify-send -u critical "$logfile" "$line"
+        notify-send -u $notifysend_urgency "$logfile" "$line"
       done &
 }
 
@@ -387,24 +391,53 @@ case $mode in
 esac
 
 
-#===============================================================================
-#---------------------------------------------------------------- REACTING ---->
+#==============================================================================
+#--------------------------------------------------------------- REACTING ---->
 # This section checks to make sure we successfully started a tail on $logfile
 
-# (DEBUG)
-ps -C tail --ppid $$ -o ppid,pid,args >&2 # Show all tails + all children
-
 # If we're using sudo w/a password, or using one of the gui sudo apps, we need
-# to give the user some time before we check for existence of tail process
-[[ $pwdreq = yes ]] && sleep 10
-
-# Confirm that a tail has been started, print success or fail notification
-if ps --no-header -o args -C tail | grep -q -- "^tail -Fn0 --pid=$$"; then
-  notify-send "$zero monitoring $logfile" "Successfully initialized monitoring process. If you didn't start $zero from a terminal and you want to shut it down at some point, a simple TERM signal will do the trick (e.g. 'pkill $zero' or 'killall $zero'). You can also peruse a list of $zero PIDs in ~/${global_pidlist_file##*/}."
-  printf "\nBegan monitoring file '$logfile' for search string '$search_str' ...\n" >&2
+# to wait for the root-user tail process to start (i.e., for user to enter pwd)
+if [[ $pwdreq == yes ]]; then
+  # Keep this loop going as long as our "sudo tail" process is still running
+  while ps --ppid $$ --no-header -o args | head -n1 | grep -q -- "tail.*pid=$$"; do
+    if ps -C tail --no-header -o args | grep -q -- "^tail -Fn0 --pid=$$"; then
+      # If our sudo-spawned tail process is running, we're finished, so break!
+      break
+    else
+      # Otherwise, wait
+      sleep 1
+    fi
+  done
 else
-  notify-send -u critical "$zero ERROR" "There was an error initializing $logfile monitoring process and $zero shut down. If you haven't yet, try running $0 from a terminal to see if there are any instructive errors."
-  printf "\nError initializing monitoring of file '$logfile' for search string '$search_str'\n" >&2
+  # If no password is required, wait 1s to ensure tail has time to start
+  sleep 1
+fi
+
+# Show all children
+{ ps --ppid $$ -o ppid,pid,args
+  if [[ $pwdreq == yes ]]; then echo
+    ps --no-header -C tail -o ppid,pid,args | grep "pid=$$"
+  fi
+} >&2
+
+# Depending on whether tail has been started, print success or fail
+if ps --no-header -o args -C tail | grep -q -- "^tail -Fn0 --pid=$$"; then
+  if tty --quiet; then
+    # Messages to print if run from an interactive terminal
+    notify-send "$zero monitoring $logfile" "Successfully initialized monitoring process. You will find a list of PIDs for $zero processes in ~/${global_pidlist_file##*/}."
+    printf "\nBegan monitoring file '$logfile' for search string '$search_str' ...\n" >&2
+  else
+    notify-send "$zero monitoring $logfile" "Successfully initialized monitoring process. A simple 'killall $zero' will shut it down. You will also find a list of PIDs for $zero processes in ~/${global_pidlist_file##*/}."    
+  fi
+  
+else
+  if tty --quiet; then
+    # Messages to print if run from an interactive terminal
+    notify-send -u $notifysend_urgency "$zero ERROR" "There was an error initializing $logfile monitoring process and $zero shut down."
+    printf "\nError initializing monitoring of file '$logfile' for search string '$search_str'\n" >&2
+  else
+    notify-send -u $notifysend_urgency "$zero ERROR" "There was an error initializing $logfile monitoring process and $zero shut down. Running $zero from a terminal might help you diagnose the problem."
+  fi
   exit $e_FAILED_TO_START_TAIL
 fi
 
